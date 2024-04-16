@@ -1,0 +1,77 @@
+# Use the official Elixir image as a base
+FROM elixir:1.14
+
+# Set environment variables for Elixir and Mix
+ENV MIX_ENV=dev \
+    TERM=xterm \
+    LANG=C.UTF-8
+
+# Install OS dependencies
+RUN apt-get update && \
+    apt-get install -y build-essential gcc postgresql-client openssl && \
+    rm -rf /var/lib/apt/lists/*
+
+# Set working directory
+WORKDIR /app
+
+# Install hex and rebar
+RUN mix local.hex --force && \
+    mix local.rebar --force
+
+# Copy and compile the Elixir project
+COPY . .
+
+# Set up PostgreSQL
+USER postgres
+RUN /etc/init.d/postgresql start && \
+    psql postgres postgres <<EOF
+CREATE USER teiserver_dev WITH PASSWORD '123456789';
+CREATE DATABASE teiserver_dev;
+GRANT ALL PRIVILEGES ON DATABASE teiserver_dev to teiserver_dev;
+ALTER USER teiserver_dev WITH SUPERUSER;
+
+CREATE USER teiserver_test WITH PASSWORD '123456789';
+CREATE DATABASE teiserver_test;
+GRANT ALL PRIVILEGES ON DATABASE teiserver_test to teiserver_test;
+ALTER USER teiserver_test WITH SUPERUSER;
+EOF
+USER root
+
+# Install sass
+RUN mix sass.install
+
+# Install dependencies
+RUN mix deps.get && \
+    mix deps.compile
+
+# Database setup
+RUN mix ecto.create
+
+# Generate localhost certificates
+RUN mkdir -p priv/certs && \
+    cd priv/certs && \
+    openssl dhparam -out dh-params.pem 2048 && \
+    openssl req -x509 -out localhost.crt -keyout localhost.key \
+      -newkey rsa:2048 -nodes -sha256 \
+      -subj '/CN=localhost' -extensions EXT -config <( \
+       printf "[dn]\nCN=localhost\n[req]\ndistinguished_name = dn\n[EXT]\nsubjectAltName=DNS:localhost\nkeyUsage=digitalSignature\nextendedKeyUsage=serverAuth") && \
+    cd ../..
+
+# Build the release
+RUN mix release
+
+# Copy the release to a new image
+FROM debian:buster-slim
+
+WORKDIR /app
+
+# Copy the Elixir release from the previous image
+COPY --from=0 /app/_build/prod/rel/your_app_name .
+
+# Install runtime dependencies
+RUN apt-get update && \
+    apt-get install -y libssl1.1 && \
+    rm -rf /var/lib/apt/lists/*
+
+# Set default command to run the app in iex (repl mode)
+CMD ["iex", "-S", "mix", "phx.server"]
